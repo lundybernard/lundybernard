@@ -12,9 +12,9 @@
 ─ Links ────────────────────────────────────────────────────────────
 
   Blog ......... lundybernard.github.io
+  LinkedIn ..... linkedin.com/in/lundy-bernard
   batconf ...... github.com/lundybernard/batconf
-  Docs ......... batconf.readthedocs.io
-  PyPI ......... pypi.org/project/batconf
+  Instagram .... instagram.com/lundybernard (bonsai · wood-working)
 
 ─ Currently Working On ─────────────────────────────────────────────
 
