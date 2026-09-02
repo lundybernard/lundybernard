@@ -1,4 +1,4 @@
-[![Lundy's github activity graph](./activity.svg)](https://github.com/lundybernard)
+[![Lundy's github activity graph](https://lundybernard.github.io/lundybernard/activity.svg)](https://github.com/lundybernard)
 
 ```python
 ─ Lundy Bernard ────────────────────────────────────────────────────
