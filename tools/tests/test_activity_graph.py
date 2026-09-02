@@ -1,5 +1,5 @@
 from datetime import date
-from json import loads
+from json import dumps, loads
 from unittest import TestCase
 from unittest.mock import Mock, call, patch
 
@@ -12,13 +12,28 @@ from tools.activity_graph import (
 )
 
 SRC = 'tools.activity_graph'
-TOTALS = {
-    'totalCommitContributions': 12,
-    'totalPullRequestContributions': 3,
-    'totalPullRequestReviewContributions': 2,
-    'totalIssueContributions': 1,
-    'totalRepositoryContributions': 0,
-    'restrictedContributionsCount': 5,
+def _connection(has_next=False, cursor='C1', nodes=()):
+    return {
+        'pageInfo': {'hasNextPage': has_next, 'endCursor': cursor},
+        'nodes': list(nodes),
+    }
+
+
+def _page(issues_next=False, issue_cursor='IS1'):
+    return {
+        'contributionCalendar': {'weeks': []},
+        'commitContributionsByRepository': [],
+        'pullRequestContributions': _connection(cursor='PR1'),
+        'pullRequestReviewContributions': _connection(cursor='RV1'),
+        'issueContributions': _connection(issues_next, issue_cursor),
+    }
+
+
+SERIES = {
+    'Commits': {'2026-08-31': 4, '2026-09-01': 1, '2026-09-02': 0},
+    'Pull requests': {'2026-08-31': 1, '2026-09-01': 1, '2026-09-02': 0},
+    'Reviews': {'2026-08-31': 1, '2026-09-01': 0, '2026-09-02': 0},
+    'Issues': {'2026-08-31': 0, '2026-09-01': 0, '2026-09-02': 0},
 }
 
 
@@ -56,7 +71,7 @@ class MainTests(TestCase):
 
             t.ActivityChart.assert_called_once_with(
                 t.ContributionHistory.return_value.daily_totals,
-                t.ContributionHistory.return_value.totals,
+                t.ContributionHistory.return_value.series,
             )
             t.Path.assert_called_once_with('chart.svg')
             t.Path.return_value.write_text.assert_called_once_with(
@@ -109,25 +124,35 @@ class ContributionHistoryTests(TestCase):
             {'2026-08-31': 11, '2026-09-01': 0, '2026-09-02': 1},
         )
 
-    def test_totals(t) -> None:
-        first = Mock(spec=['totals'])
-        first.totals = {
-            'totalCommitContributions': 3,
-            'totalIssueContributions': 1,
+    def test_window(t) -> None:
+        t.assertEqual(
+            t.ch.window,
+            ('2026-08-31', '2026-09-01', '2026-09-02'),
+        )
+
+    def test_series(t) -> None:
+        first = Mock(spec=['series'])
+        first.series = {
+            'Commits': {'2026-08-30': 9, '2026-08-31': 2},
+            'Issues': {'2026-09-02': 1},
         }
-        second = Mock(spec=['totals'])
-        second.totals = {
-            'totalCommitContributions': 4,
-            'restrictedContributionsCount': 2,
-        }
+        second = Mock(spec=['series'])
+        second.series = {'Commits': {'2026-08-31': 5}}
         t.ch.calendars = (first, second)
 
         t.assertEqual(
-            t.ch.totals,
+            t.ch.series,
             {
-                'totalCommitContributions': 7,
-                'totalIssueContributions': 1,
-                'restrictedContributionsCount': 2,
+                'Commits': {
+                    '2026-08-31': 7,
+                    '2026-09-01': 0,
+                    '2026-09-02': 0,
+                },
+                'Issues': {
+                    '2026-08-31': 0,
+                    '2026-09-01': 0,
+                    '2026-09-02': 1,
+                },
             },
         )
 
@@ -140,8 +165,7 @@ class ContributionCalendarTests(TestCase):
             patcher = patch(f'{SRC}.{target}', autospec=True)
             setattr(t, target, patcher.start())
             t.addCleanup(patcher.stop)
-        reply = t.urlopen.return_value.__enter__.return_value
-        reply.read.return_value = b'{"data": {"user": null}}'
+        t.reply = t.urlopen.return_value.__enter__.return_value
         t.cc = ContributionCalendar(
             'alpha',
             date(2026, 8, 31),
@@ -149,87 +173,189 @@ class ContributionCalendarTests(TestCase):
             'TOKEN',
         )
 
-    def test_response(t) -> None:
-        t.assertEqual(t.cc.response, {'data': {'user': None}})
+    def test_pages(t) -> None:
+        with t.subTest('one request'):
+            last = _page()
+            t.reply.read.return_value = dumps(
+                {'data': {'user': {'contributionsCollection': last}}}
+            ).encode()
 
-        t.urlopen.assert_called_once_with(t.Request.return_value)
-        t.assertEqual(
-            t.Request.call_args.args,
-            ('https://api.github.com/graphql',),
-        )
-        t.assertEqual(
-            t.Request.call_args.kwargs['headers'],
-            {
-                'Authorization': 'bearer TOKEN',
-                'Content-Type': 'application/json',
-            },
-        )
-        body = loads(t.Request.call_args.kwargs['data'])
-        t.assertEqual(
-            body['variables'],
-            {
-                'login': 'alpha',
-                'from': '2026-08-31T00:00:00Z',
-                'to': '2026-09-02T23:59:59Z',
-            },
-        )
-        t.assertIn('contributionCalendar', body['query'])
-        t.assertIn('totalCommitContributions', body['query'])
-        t.assertIn('restrictedContributionsCount', body['query'])
+            t.assertEqual(t.cc.pages, (last,))
 
-    def test_collection(t) -> None:
-        t.cc.response = {
-            'data': {'user': {'contributionsCollection': {'weeks': []}}}
-        }
+            t.assertEqual(
+                t.Request.call_args.args,
+                ('https://api.github.com/graphql',),
+            )
+            t.assertEqual(
+                t.Request.call_args.kwargs['headers'],
+                {
+                    'Authorization': 'bearer TOKEN',
+                    'Content-Type': 'application/json',
+                },
+            )
+            body = loads(t.Request.call_args.kwargs['data'])
+            t.assertEqual(
+                body['variables'],
+                {
+                    'login': 'alpha',
+                    'from': '2026-08-31T00:00:00Z',
+                    'to': '2026-09-02T23:59:59Z',
+                    'prCursor': None,
+                    'reviewCursor': None,
+                    'issueCursor': None,
+                },
+            )
+            for field in (
+                'contributionCalendar',
+                'commitContributionsByRepository',
+                'pullRequestContributions',
+                'pullRequestReviewContributions',
+                'issueContributions',
+            ):
+                t.assertIn(field, body['query'])
 
-        t.assertEqual(t.cc.collection, {'weeks': []})
+        with t.subTest('follows the cursor of an unread connection'):
+            t.cc = ContributionCalendar(
+                'alpha',
+                date(2026, 8, 31),
+                date(2026, 9, 2),
+                'TOKEN',
+            )
+            more, last = _page(True, 'IS2'), _page()
+            t.reply.read.side_effect = [
+                dumps(
+                    {'data': {'user': {'contributionsCollection': page}}}
+                ).encode()
+                for page in (more, last)
+            ]
 
-    def test_totals(t) -> None:
-        t.cc.collection = {
-            'totalCommitContributions': 9,
-            'totalPullRequestContributions': 4,
-            'totalPullRequestReviewContributions': 3,
-            'totalIssueContributions': 2,
-            'totalRepositoryContributions': 1,
-            'restrictedContributionsCount': 6,
-            'contributionCalendar': {'weeks': []},
-        }
+            t.assertEqual(t.cc.pages, (more, last))
 
-        t.assertEqual(
-            t.cc.totals,
-            {
-                'totalCommitContributions': 9,
-                'totalPullRequestContributions': 4,
-                'totalPullRequestReviewContributions': 3,
-                'totalIssueContributions': 2,
-                'totalRepositoryContributions': 1,
-                'restrictedContributionsCount': 6,
-            },
-        )
+            body = loads(t.Request.call_args.kwargs['data'])
+            t.assertEqual(body['variables']['issueCursor'], 'IS2')
 
     def test_daily_counts(t) -> None:
-        t.cc.collection = {
-            'contributionCalendar': {
-                'weeks': [
-                    {
-                        'contributionDays': [
-                            {'date': '2026-08-31', 'contributionCount': 4},
-                            {'date': '2026-09-01', 'contributionCount': 0},
-                        ]
-                    },
-                    {
-                        'contributionDays': [
-                            {'date': '2026-09-02', 'contributionCount': 7},
-                        ]
-                    },
-                ]
-            }
-        }
+        t.cc.pages = (
+            {
+                'contributionCalendar': {
+                    'weeks': [
+                        {
+                            'contributionDays': [
+                                {'date': '2026-08-31', 'contributionCount': 4},
+                                {'date': '2026-09-01', 'contributionCount': 0},
+                            ]
+                        },
+                        {
+                            'contributionDays': [
+                                {'date': '2026-09-02', 'contributionCount': 7},
+                            ]
+                        },
+                    ]
+                }
+            },
+        )
 
         t.assertEqual(
             t.cc.daily_counts,
             {'2026-08-31': 4, '2026-09-01': 0, '2026-09-02': 7},
         )
+
+    def test_series(t) -> None:
+        with t.subTest('counts every page, commits once'):
+            t.cc.pages = (
+                {
+                    'commitContributionsByRepository': [
+                        {
+                            'contributions': {
+                                'pageInfo': {'hasNextPage': False},
+                                'nodes': [
+                                    {
+                                        'occurredAt': '2026-08-31T10:00:00Z',
+                                        'commitCount': 3,
+                                    },
+                                    {
+                                        'occurredAt': '2026-09-01T09:00:00Z',
+                                        'commitCount': 2,
+                                    },
+                                ],
+                            }
+                        },
+                        {
+                            'contributions': {
+                                'pageInfo': {'hasNextPage': False},
+                                'nodes': [
+                                    {
+                                        'occurredAt': '2026-08-31T12:00:00Z',
+                                        'commitCount': 4,
+                                    },
+                                ],
+                            }
+                        },
+                    ],
+                    'pullRequestContributions': {
+                        'nodes': [{'occurredAt': '2026-08-31T08:00:00Z'}]
+                    },
+                    'pullRequestReviewContributions': {'nodes': []},
+                    'issueContributions': {
+                        'nodes': [{'occurredAt': '2026-09-02T08:00:00Z'}]
+                    },
+                },
+                {
+                    'commitContributionsByRepository': [
+                        {
+                            'contributions': {
+                                'pageInfo': {'hasNextPage': False},
+                                'nodes': [
+                                    {
+                                        'occurredAt': '2026-09-02T10:00:00Z',
+                                        'commitCount': 99,
+                                    },
+                                ],
+                            }
+                        },
+                    ],
+                    'pullRequestContributions': {
+                        'nodes': [{'occurredAt': '2026-08-31T09:00:00Z'}]
+                    },
+                    'pullRequestReviewContributions': {'nodes': []},
+                    'issueContributions': {'nodes': []},
+                },
+            )
+
+            t.assertEqual(
+                t.cc.series,
+                {
+                    'Commits': {'2026-08-31': 7, '2026-09-01': 2},
+                    'Pull requests': {'2026-08-31': 2},
+                    'Reviews': {},
+                    'Issues': {'2026-09-02': 1},
+                },
+            )
+
+        with t.subTest('an unread commit page'):
+            t.cc = ContributionCalendar(
+                'alpha',
+                date(2026, 8, 31),
+                date(2026, 9, 2),
+                'TOKEN',
+            )
+            t.cc.pages = (
+                {
+                    'commitContributionsByRepository': [
+                        {
+                            'contributions': {
+                                'pageInfo': {'hasNextPage': True},
+                                'nodes': [],
+                            }
+                        },
+                    ],
+                },
+            )
+
+            with t.assertRaisesRegex(
+                RuntimeError, 'more commits than one page'
+            ):
+                t.cc.series
 
 
 class ActivityChartTests(TestCase):
@@ -238,7 +364,7 @@ class ActivityChartTests(TestCase):
     def setUp(t) -> None:  # pylint: disable=arguments-renamed
         t.ac = ActivityChart(
             {'2026-09-02': 0, '2026-08-31': 6, '2026-09-01': 2},
-            TOTALS,
+            SERIES,
         )
 
     def test_ceiling(t) -> None:
@@ -246,14 +372,22 @@ class ActivityChartTests(TestCase):
             t.assertEqual(t.ac.ceiling, 8)
 
         with t.subTest('an exact multiple stands'):
-            t.ac = ActivityChart({'2026-08-31': 44}, TOTALS)
+            t.ac = ActivityChart({'2026-08-31': 44}, SERIES)
 
             t.assertEqual(t.ac.ceiling, 44)
 
         with t.subTest('no contributions'):
-            t.ac = ActivityChart({'2026-08-31': 0}, TOTALS)
+            t.ac = ActivityChart({'2026-08-31': 0}, SERIES)
 
             t.assertEqual(t.ac.ceiling, 4)
+
+        with t.subTest('a type above the daily total'):
+            t.ac = ActivityChart(
+                {'2026-08-31': 2},
+                {'Commits': {'2026-08-31': 9}},
+            )
+
+            t.assertEqual(t.ac.ceiling, 12)
 
     def test_points(t) -> None:
         t.assertEqual(
@@ -265,26 +399,31 @@ class ActivityChartTests(TestCase):
             ),
         )
 
-    def test_breakdown(t) -> None:
-        with t.subTest('every type'):
-            t.assertEqual(
-                t.ac.breakdown,
-                'Total 8 · Commits 12 · Pull requests 3'
-                ' · Reviews 2 · Issues 1 · Repos created 0'
-                ' · Private 5',
-            )
+    def test_series_points(t) -> None:
+        t.assertEqual(
+            tuple(t.ac.series_points),
+            ('Commits', 'Pull requests', 'Reviews', 'Issues'),
+        )
+        t.assertEqual(
+            t.ac.series_points['Commits'],
+            (
+                Point(44.0, 157.0, '2026-08-31', 4),
+                Point(462.0, 238.75, '2026-09-01', 1),
+                Point(880.0, 266.0, '2026-09-02', 0),
+            ),
+        )
 
-        with t.subTest('no private contributions'):
-            t.ac = ActivityChart(
-                {'2026-08-31': 1},
-                {**TOTALS, 'restrictedContributionsCount': 0},
-            )
-
-            t.assertEqual(
-                t.ac.breakdown,
-                'Total 1 · Commits 12 · Pull requests 3'
-                ' · Reviews 2 · Issues 1 · Repos created 0',
-            )
+    def test_legend(t) -> None:
+        t.assertEqual(
+            t.ac.legend,
+            (
+                ('Total', 8),
+                ('Commits', 5),
+                ('Pull requests', 2),
+                ('Reviews', 1),
+                ('Issues', 0),
+            ),
+        )
 
     def test_svg(t) -> None:
         with t.subTest('document'):
@@ -301,8 +440,42 @@ class ActivityChartTests(TestCase):
             t.assertIn('>08-31<', svg)
             t.assertIn('>09-02<', svg)
             t.assertIn('y="288"', svg)
+
+        with t.subTest('a group per series, the types under the total'):
+            svg = t.ac.svg
+
+            t.assertIn('<g aria-label="Total">', svg)
+            for name in ('Commits', 'Pull requests', 'Reviews', 'Issues'):
+                t.assertIn(f'<g aria-label="{name}">', svg)
+            t.assertIn(
+                '<desc>2026-08-31: 4\n2026-09-01: 1\n2026-09-02: 0</desc>',
+                svg,
+            )
+            t.assertIn('#2a78d6', svg)
+            t.assertIn('stroke-dasharray="5 3"', svg)
+            t.assertLess(
+                svg.index('aria-label="Commits"'),
+                svg.index('aria-label="Total"'),
+            )
+
+        with t.subTest('the total fill sits under the type lines'):
+            svg = t.ac.svg
+
+            t.assertLess(
+                svg.index('<polygon'),
+                svg.index('aria-label="Commits"'),
+            )
+            t.assertLess(
+                svg.index('aria-label="Issues"'),
+                svg.index('aria-label="Total"'),
+            )
+
+        with t.subTest('legend'):
+            svg = t.ac.svg
+
             t.assertIn('y="318"', svg)
-            t.assertIn('>Total 8 · Commits 12', svg)
+            t.assertIn('>Total 8</text>', svg)
+            t.assertIn('>Pull requests 2</text>', svg)
 
         with t.subTest('gridlines carry integer labels'):
             svg = t.ac.svg
@@ -313,10 +486,8 @@ class ActivityChartTests(TestCase):
             t.assertIn('>8</text>', svg)
 
         with t.subTest('one day label in five'):
-            t.ac = ActivityChart(
-                {f'2026-08-0{day}': 0 for day in range(1, 8)},
-                TOTALS,
-            )
+            days = {f'2026-08-0{day}': 0 for day in range(1, 8)}
+            t.ac = ActivityChart(days, {name: days for name in SERIES})
 
             svg = t.ac.svg
 
