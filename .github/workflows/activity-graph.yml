@@ -1,0 +1,31 @@
+name: Activity graph
+
+on:
+  schedule:
+    - cron: '17 5 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Render the activity graph
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: python3 tools/activity_graph.py --out activity.svg
+
+      - name: Commit the activity graph
+        run: |
+          if git diff --quiet -- activity.svg; then
+            echo 'activity.svg is unchanged'
+            exit 0
+          fi
+          git config user.name 'github-actions[bot]'
+          git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
+          git commit -m 'chore: update the activity graph' -- activity.svg
+          git push
