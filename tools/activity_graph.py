@@ -21,10 +21,25 @@ LOGINS = ('lundybernard', '3M1LY-lb')
 WINDOW_DAYS = 31
 
 API_URL = 'https://api.github.com/graphql'
+PRIVATE_FIELD = 'restrictedContributionsCount'
+CONTRIBUTION_TYPES = (
+    ('Commits', 'totalCommitContributions'),
+    ('Pull requests', 'totalPullRequestContributions'),
+    ('Reviews', 'totalPullRequestReviewContributions'),
+    ('Issues', 'totalIssueContributions'),
+    ('Repos created', 'totalRepositoryContributions'),
+    ('Private', PRIVATE_FIELD),
+)
 QUERY = """
 query($login: String!, $from: DateTime!, $to: DateTime!) {
   user(login: $login) {
     contributionsCollection(from: $from, to: $to) {
+      totalCommitContributions
+      totalPullRequestContributions
+      totalPullRequestReviewContributions
+      totalIssueContributions
+      totalRepositoryContributions
+      restrictedContributionsCount
       contributionCalendar {
         weeks { contributionDays { date contributionCount } }
       }
@@ -34,11 +49,11 @@ query($login: String!, $from: DateTime!, $to: DateTime!) {
 """
 
 WIDTH = 900
-HEIGHT = 300
+HEIGHT = 330
 PAD_LEFT = 44
 PAD_RIGHT = 20
 PAD_TOP = 48
-PAD_BOTTOM = 34
+PAD_BOTTOM = 64
 GRID_LINES = 4
 LABEL_EVERY = 5
 TITLE = 'Recent Contributions'
@@ -49,6 +64,8 @@ FONT = 'Segoe UI, Helvetica, Arial, sans-serif'
 PLOT_WIDTH = WIDTH - PAD_LEFT - PAD_RIGHT
 PLOT_HEIGHT = HEIGHT - PAD_TOP - PAD_BOTTOM
 PLOT_BOTTOM = HEIGHT - PAD_BOTTOM
+DAY_LABEL_Y = PLOT_BOTTOM + 22
+BREAKDOWN_Y = HEIGHT - 12
 
 
 class Point(NamedTuple):
@@ -96,13 +113,25 @@ class ContributionCalendar:
             return loads(reply.read())
 
     @cached_property
+    def collection(self) -> dict:
+        """The contributionsCollection object of the response."""
+        return self.response['data']['user']['contributionsCollection']
+
+    @cached_property
+    def totals(self) -> dict[str, int]:
+        """Contribution count per type over the window."""
+        return {
+            field: self.collection[field]
+            for _, field in CONTRIBUTION_TYPES
+        }
+
+    @cached_property
     def daily_counts(self) -> dict[str, int]:
         """Contribution count per ISO date.
 
         The response can include days outside the requested range.
         """
-        collection = self.response['data']['user']['contributionsCollection']
-        weeks = collection['contributionCalendar']['weeks']
+        weeks = self.collection['contributionCalendar']['weeks']
         return {
             day['date']: day['contributionCount']
             for week in weeks
@@ -134,6 +163,14 @@ class ContributionHistory:
         )
 
     @cached_property
+    def totals(self) -> dict[str, int]:
+        """Contribution count per type, summed over the accounts."""
+        counts: Counter[str] = Counter()
+        for calendar in self.calendars:
+            counts.update(calendar.totals)
+        return dict(counts)
+
+    @cached_property
     def daily_totals(self) -> dict[str, int]:
         """Summed count for every ISO date in the window, zero filled."""
         counts: Counter[str] = Counter()
@@ -150,8 +187,27 @@ class ContributionHistory:
 class ActivityChart:
     """SVG line chart of daily contribution counts."""
 
-    def __init__(self, daily_counts: Mapping[str, int]) -> None:
+    def __init__(
+        self,
+        daily_counts: Mapping[str, int],
+        totals: Mapping[str, int],
+    ) -> None:
         self.daily_counts = daily_counts
+        self.totals = totals
+
+    @cached_property
+    def breakdown(self) -> str:
+        """The contribution summary line under the chart.
+
+        The line omits a private count of zero.
+        """
+        entries = [f'Total {sum(self.daily_counts.values())}']
+        for label, field in CONTRIBUTION_TYPES:
+            count = self.totals[field]
+            if field == PRIVATE_FIELD and not count:
+                continue
+            entries.append(f'{label} {count}')
+        return ' · '.join(entries)
 
     @cached_property
     def ceiling(self) -> int:
@@ -201,6 +257,8 @@ class ActivityChart:
             f' stroke-linejoin="round"/>',
             *self._markers(),
             *self._day_labels(),
+            f'<text x="{PAD_LEFT}" y="{BREAKDOWN_Y}" fill="{MUTED}"'
+            f' font-family="{FONT}" font-size="12">{self.breakdown}</text>',
             '</svg>',
         ]
         return '\n'.join(elements) + '\n'
@@ -236,7 +294,7 @@ class ActivityChart:
         """Return a label for one day in LABEL_EVERY, and for the last."""
         last = len(self.points) - 1
         return [
-            f'<text x="{point.x:.1f}" y="{HEIGHT - 12}" fill="{MUTED}"'
+            f'<text x="{point.x:.1f}" y="{DAY_LABEL_Y}" fill="{MUTED}"'
             f' font-family="{FONT}" font-size="11"'
             f' text-anchor="middle">{point.day[5:]}</text>'
             for index, point in enumerate(self.points)
@@ -261,7 +319,7 @@ def main(argv: Sequence[str] | None = None) -> None:
         end,
         getenv('GH_TOKEN', ''),
     )
-    chart = ActivityChart(history.daily_totals)
+    chart = ActivityChart(history.daily_totals, history.totals)
     Path(args.out).write_text(chart.svg, encoding='utf-8')
 
 

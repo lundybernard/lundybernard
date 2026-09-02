@@ -12,6 +12,14 @@ from tools.activity_graph import (
 )
 
 SRC = 'tools.activity_graph'
+TOTALS = {
+    'totalCommitContributions': 12,
+    'totalPullRequestContributions': 3,
+    'totalPullRequestReviewContributions': 2,
+    'totalIssueContributions': 1,
+    'totalRepositoryContributions': 0,
+    'restrictedContributionsCount': 5,
+}
 
 
 class MainTests(TestCase):
@@ -47,7 +55,8 @@ class MainTests(TestCase):
             main(['--out', 'chart.svg'])
 
             t.ActivityChart.assert_called_once_with(
-                t.ContributionHistory.return_value.daily_totals
+                t.ContributionHistory.return_value.daily_totals,
+                t.ContributionHistory.return_value.totals,
             )
             t.Path.assert_called_once_with('chart.svg')
             t.Path.return_value.write_text.assert_called_once_with(
@@ -100,6 +109,28 @@ class ContributionHistoryTests(TestCase):
             {'2026-08-31': 11, '2026-09-01': 0, '2026-09-02': 1},
         )
 
+    def test_totals(t) -> None:
+        first = Mock(spec=['totals'])
+        first.totals = {
+            'totalCommitContributions': 3,
+            'totalIssueContributions': 1,
+        }
+        second = Mock(spec=['totals'])
+        second.totals = {
+            'totalCommitContributions': 4,
+            'restrictedContributionsCount': 2,
+        }
+        t.ch.calendars = (first, second)
+
+        t.assertEqual(
+            t.ch.totals,
+            {
+                'totalCommitContributions': 7,
+                'totalIssueContributions': 1,
+                'restrictedContributionsCount': 2,
+            },
+        )
+
 
 class ContributionCalendarTests(TestCase):
     """Unit tests for tools.activity_graph.ContributionCalendar."""
@@ -143,38 +174,55 @@ class ContributionCalendarTests(TestCase):
             },
         )
         t.assertIn('contributionCalendar', body['query'])
+        t.assertIn('totalCommitContributions', body['query'])
+        t.assertIn('restrictedContributionsCount', body['query'])
+
+    def test_collection(t) -> None:
+        t.cc.response = {
+            'data': {'user': {'contributionsCollection': {'weeks': []}}}
+        }
+
+        t.assertEqual(t.cc.collection, {'weeks': []})
+
+    def test_totals(t) -> None:
+        t.cc.collection = {
+            'totalCommitContributions': 9,
+            'totalPullRequestContributions': 4,
+            'totalPullRequestReviewContributions': 3,
+            'totalIssueContributions': 2,
+            'totalRepositoryContributions': 1,
+            'restrictedContributionsCount': 6,
+            'contributionCalendar': {'weeks': []},
+        }
+
+        t.assertEqual(
+            t.cc.totals,
+            {
+                'totalCommitContributions': 9,
+                'totalPullRequestContributions': 4,
+                'totalPullRequestReviewContributions': 3,
+                'totalIssueContributions': 2,
+                'totalRepositoryContributions': 1,
+                'restrictedContributionsCount': 6,
+            },
+        )
 
     def test_daily_counts(t) -> None:
-        t.cc.response = {
-            'data': {
-                'user': {
-                    'contributionsCollection': {
-                        'contributionCalendar': {
-                            'weeks': [
-                                {
-                                    'contributionDays': [
-                                        {
-                                            'date': '2026-08-31',
-                                            'contributionCount': 4,
-                                        },
-                                        {
-                                            'date': '2026-09-01',
-                                            'contributionCount': 0,
-                                        },
-                                    ]
-                                },
-                                {
-                                    'contributionDays': [
-                                        {
-                                            'date': '2026-09-02',
-                                            'contributionCount': 7,
-                                        },
-                                    ]
-                                },
-                            ]
-                        }
-                    }
-                }
+        t.cc.collection = {
+            'contributionCalendar': {
+                'weeks': [
+                    {
+                        'contributionDays': [
+                            {'date': '2026-08-31', 'contributionCount': 4},
+                            {'date': '2026-09-01', 'contributionCount': 0},
+                        ]
+                    },
+                    {
+                        'contributionDays': [
+                            {'date': '2026-09-02', 'contributionCount': 7},
+                        ]
+                    },
+                ]
             }
         }
 
@@ -189,7 +237,8 @@ class ActivityChartTests(TestCase):
 
     def setUp(t) -> None:  # pylint: disable=arguments-renamed
         t.ac = ActivityChart(
-            {'2026-09-02': 0, '2026-08-31': 6, '2026-09-01': 2}
+            {'2026-09-02': 0, '2026-08-31': 6, '2026-09-01': 2},
+            TOTALS,
         )
 
     def test_ceiling(t) -> None:
@@ -197,12 +246,12 @@ class ActivityChartTests(TestCase):
             t.assertEqual(t.ac.ceiling, 8)
 
         with t.subTest('an exact multiple stands'):
-            t.ac = ActivityChart({'2026-08-31': 44})
+            t.ac = ActivityChart({'2026-08-31': 44}, TOTALS)
 
             t.assertEqual(t.ac.ceiling, 44)
 
         with t.subTest('no contributions'):
-            t.ac = ActivityChart({'2026-08-31': 0})
+            t.ac = ActivityChart({'2026-08-31': 0}, TOTALS)
 
             t.assertEqual(t.ac.ceiling, 4)
 
@@ -216,13 +265,34 @@ class ActivityChartTests(TestCase):
             ),
         )
 
+    def test_breakdown(t) -> None:
+        with t.subTest('every type'):
+            t.assertEqual(
+                t.ac.breakdown,
+                'Total 8 · Commits 12 · Pull requests 3'
+                ' · Reviews 2 · Issues 1 · Repos created 0'
+                ' · Private 5',
+            )
+
+        with t.subTest('no private contributions'):
+            t.ac = ActivityChart(
+                {'2026-08-31': 1},
+                {**TOTALS, 'restrictedContributionsCount': 0},
+            )
+
+            t.assertEqual(
+                t.ac.breakdown,
+                'Total 1 · Commits 12 · Pull requests 3'
+                ' · Reviews 2 · Issues 1 · Repos created 0',
+            )
+
     def test_svg(t) -> None:
         with t.subTest('document'):
             svg = t.ac.svg
 
             t.assertTrue(svg.startswith('<svg '), svg[:40])
             t.assertTrue(svg.endswith('</svg>\n'), svg[-40:])
-            t.assertIn('viewBox="0 0 900 300"', svg)
+            t.assertIn('viewBox="0 0 900 330"', svg)
             t.assertIn('>Recent Contributions<', svg)
             t.assertIn('#26a641', svg)
             t.assertIn('points="44.0,102.5 462.0,211.5 880.0,266.0"', svg)
@@ -230,6 +300,9 @@ class ActivityChartTests(TestCase):
             t.assertIn('<title>2026-09-02: 0</title>', svg)
             t.assertIn('>08-31<', svg)
             t.assertIn('>09-02<', svg)
+            t.assertIn('y="288"', svg)
+            t.assertIn('y="318"', svg)
+            t.assertIn('>Total 8 · Commits 12', svg)
 
         with t.subTest('gridlines carry integer labels'):
             svg = t.ac.svg
@@ -241,7 +314,8 @@ class ActivityChartTests(TestCase):
 
         with t.subTest('one day label in five'):
             t.ac = ActivityChart(
-                {f'2026-08-0{day}': 0 for day in range(1, 8)}
+                {f'2026-08-0{day}': 0 for day in range(1, 8)},
+                TOTALS,
             )
 
             svg = t.ac.svg
