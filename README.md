@@ -1,4 +1,4 @@
-[![Lundy's github activity graph](https://github-readme-activity-graph.vercel.app/graph?username=lundybernard&custom_title=Recent%20Commits&hide_border=true&theme=github-compact)](https://github.com/lundybernard)
+[![Lundy's github activity graph](./activity.svg)](https://github.com/lundybernard)
 
 ```python
 ─ Lundy Bernard ────────────────────────────────────────────────────
