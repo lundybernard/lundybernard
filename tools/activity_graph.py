@@ -1,7 +1,8 @@
 """Render a daily contribution chart for a set of GitHub accounts.
 
 The chart sums the contribution calendars of every account in LOGINS over the
-last WINDOW_DAYS days. The GitHub API token comes from the GH_TOKEN
+last WINDOW_DAYS complete UTC days. The chart omits the day in progress,
+whose counts are partial. The GitHub API token comes from the GH_TOKEN
 environment variable. The module uses the standard library only.
 """
 
@@ -451,7 +452,7 @@ def main(argv: Sequence[str] | None = None) -> None:
     )
     args = parser.parse_args(argv)
 
-    end = datetime.now(timezone.utc).date()
+    end = datetime.now(timezone.utc).date() - timedelta(days=1)
     history = ContributionHistory(
         LOGINS,
         end - timedelta(days=WINDOW_DAYS - 1),
