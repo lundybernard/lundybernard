@@ -59,8 +59,8 @@ class MainTests(TestCase):
 
         t.ContributionHistory.assert_called_once_with(
             ('lundybernard', '3M1LY-lb'),
-            date(2026, 8, 3),
-            date(2026, 9, 2),
+            date(2026, 8, 2),
+            date(2026, 9, 1),
             'TOKEN',
         )
         t.getenv.assert_called_once_with('GH_TOKEN', '')
